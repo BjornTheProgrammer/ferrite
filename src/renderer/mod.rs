@@ -1,9 +1,11 @@
 pub mod camera;
 pub mod chunk;
 mod context;
+pub mod pipelines;
 pub(crate) mod shader;
 mod swapchain;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,9 +15,12 @@ use thiserror::Error;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use camera::Camera;
+use camera::{Camera, CameraUniform};
+use chunk::atlas::TextureAtlas;
+use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
+use pipelines::chunk::ChunkPipeline;
 use swapchain::SwapchainState;
 
 use crate::assets::AssetIndex;
@@ -36,6 +41,9 @@ pub struct Renderer {
     swapchain: SwapchainState,
     camera: Camera,
     registry: BlockRegistry,
+    atlas: TextureAtlas,
+    chunk_pipeline: ChunkPipeline,
+    chunk_buffers: ChunkBufferStore,
     egui_state: egui_winit::State,
     egui_ctx: egui::Context,
     swapchain_dirty: bool,
@@ -46,7 +54,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         window: Arc<Window>,
-        _assets_dir: &Path,
+        assets_dir: &Path,
         _asset_index: &Option<AssetIndex>,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
@@ -68,6 +76,25 @@ impl Renderer {
         let camera = Camera::new(swapchain_state.aspect_ratio());
         let registry = BlockRegistry::new();
 
+        let texture_names: HashSet<&str> = registry.texture_names().collect();
+        let atlas = TextureAtlas::build(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            &ctx.allocator,
+            assets_dir,
+            &texture_names,
+        )?;
+
+        let chunk_pipeline = ChunkPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+        );
+
+        let chunk_buffers = ChunkBufferStore::new();
+
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -83,6 +110,9 @@ impl Renderer {
             swapchain: swapchain_state,
             camera,
             registry,
+            atlas,
+            chunk_pipeline,
+            chunk_buffers,
             egui_state,
             egui_ctx,
             swapchain_dirty: false,
@@ -103,6 +133,10 @@ impl Renderer {
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
+        unsafe { let _ = self.ctx.device.device_wait_idle(); }
+
+        self.chunk_pipeline.destroy(&self.ctx.device, &self.ctx.allocator);
+
         self.swapchain.destroy(
             &self.ctx.device,
             &self.ctx.swapchain_loader,
@@ -120,6 +154,14 @@ impl Renderer {
             self.ctx.present_family,
             &self.ctx.allocator,
         )?;
+
+        self.chunk_pipeline = ChunkPipeline::new(
+            &self.ctx.device,
+            self.swapchain.render_pass,
+            &self.ctx.allocator,
+            &self.atlas,
+        );
+
         self.swapchain_dirty = false;
         Ok(())
     }
@@ -159,20 +201,23 @@ impl Renderer {
             .set_position(glam::Vec3::new(x as f32, y as f32, z as f32), yaw, pitch);
     }
 
-    pub fn upload_chunk_mesh(&mut self, _mesh: &ChunkMeshData) {
-        // TODO: Phase 8 step 3 — Vulkan chunk mesh upload
+    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
+        self.chunk_buffers
+            .upload(&self.ctx.device, &self.ctx.allocator, mesh);
     }
 
-    pub fn remove_chunk_mesh(&mut self, _pos: &ChunkPos) {
-        // TODO: Phase 8 step 3
+    pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
+        self.chunk_buffers
+            .remove(&self.ctx.device, &self.ctx.allocator, pos);
     }
 
     pub fn clear_chunk_meshes(&mut self) {
-        // TODO: Phase 8 step 3
+        self.chunk_buffers
+            .clear(&self.ctx.device, &self.ctx.allocator);
     }
 
     pub fn create_mesh_dispatcher(&self) -> MeshDispatcher {
-        MeshDispatcher::new(self.registry.clone(), chunk::atlas::AtlasUVMap::empty())
+        MeshDispatcher::new(self.registry.clone(), self.atlas.uv_map.clone())
     }
 
     pub fn render_world(
@@ -181,7 +226,7 @@ impl Renderer {
         hide_cursor: bool,
         _hud_fn: impl FnMut(&egui::Context),
     ) -> Result<(), RendererError> {
-        self.render_frame(window, hide_cursor, [0.529, 0.808, 0.922, 1.0])
+        self.render_frame(window, hide_cursor, [0.529, 0.808, 0.922, 1.0], true)
     }
 
     pub fn render_ui(
@@ -190,7 +235,7 @@ impl Renderer {
         _scroll: f32,
         _ui_fn: impl FnMut(&egui::Context),
     ) -> Result<(), RendererError> {
-        self.render_frame(window, false, [0.0, 0.0, 0.0, 1.0])
+        self.render_frame(window, false, [0.0, 0.0, 0.0, 1.0], false)
     }
 
     fn render_frame(
@@ -198,6 +243,7 @@ impl Renderer {
         _window: &Window,
         _hide_cursor: bool,
         clear_color: [f32; 4],
+        draw_chunks: bool,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -230,6 +276,11 @@ impl Renderer {
             }
             Err(e) => return Err(e.into()),
         };
+
+        if draw_chunks {
+            let uniform = CameraUniform::from_camera(&self.camera);
+            self.chunk_pipeline.update_camera(frame, &uniform);
+        }
 
         unsafe {
             self.ctx.device.reset_fences(&[fence])?;
@@ -271,7 +322,26 @@ impl Renderer {
                 vk::SubpassContents::INLINE,
             );
 
-            // TODO: Draw chunks, egui, etc.
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: self.swapchain.extent.width as f32,
+                height: self.swapchain.extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            self.ctx.device.cmd_set_viewport(cmd, 0, &[viewport]);
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            };
+            self.ctx.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+            if draw_chunks {
+                self.chunk_pipeline.bind(&self.ctx.device, cmd, frame);
+                self.chunk_buffers.draw(&self.ctx.device, cmd);
+            }
 
             self.ctx.device.cmd_end_render_pass(cmd);
             self.ctx.device.end_command_buffer(cmd)?;
@@ -319,6 +389,12 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe { let _ = self.ctx.device.device_wait_idle(); }
+        self.chunk_buffers
+            .clear(&self.ctx.device, &self.ctx.allocator);
+        self.chunk_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.atlas
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.swapchain.destroy(
             &self.ctx.device,
             &self.ctx.swapchain_loader,

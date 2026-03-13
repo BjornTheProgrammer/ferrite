@@ -15,6 +15,9 @@ pub struct LocalPlayer {
     pub food: u32,
     pub saturation: f32,
     pub inventory: Inventory,
+    pub sprinting: bool,
+    pub sprint_toggle_timer: u32,
+    pub was_forward_pressed: bool,
 }
 
 impl LocalPlayer {
@@ -29,6 +32,9 @@ impl LocalPlayer {
             food: 20,
             saturation: 5.0,
             inventory: Inventory::new(),
+            sprinting: false,
+            sprint_toggle_timer: 0,
+            was_forward_pressed: false,
         }
     }
 }

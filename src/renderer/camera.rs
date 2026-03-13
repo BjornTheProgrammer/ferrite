@@ -14,6 +14,7 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     aspect_ratio: f32,
+    fov_modifier: f32,
 }
 
 impl Camera {
@@ -23,6 +24,7 @@ impl Camera {
             yaw: 0.0,
             pitch: 0.0,
             aspect_ratio,
+            fov_modifier: 1.0,
         }
     }
 
@@ -48,6 +50,11 @@ impl Camera {
         self.pitch = pitch_degrees.to_radians();
     }
 
+    pub fn update_fov_modifier(&mut self, sprinting: bool) {
+        let target = if sprinting { 1.15 } else { 1.0 };
+        self.fov_modifier += (target - self.fov_modifier) * 0.5;
+    }
+
     pub fn view_projection(&self) -> Mat4 {
         let forward = Vec3::new(
             -self.yaw.sin() * self.pitch.cos(),
@@ -55,7 +62,8 @@ impl Camera {
             -self.yaw.cos() * self.pitch.cos(),
         );
         let view = Mat4::look_to_rh(self.position, forward, UP);
-        let mut proj = Mat4::perspective_rh(DEFAULT_FOV, self.aspect_ratio, NEAR, FAR);
+        let fov = DEFAULT_FOV * self.fov_modifier;
+        let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0;
         proj * view
     }

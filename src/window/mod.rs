@@ -342,6 +342,10 @@ impl App {
         self.prev_player_pos = self.player.position;
         movement::tick(&mut self.player, &self.input, &self.chunk_store);
 
+        if let Some(renderer) = &mut self.renderer {
+            renderer.update_fov(self.player.sprinting);
+        }
+
         if !self.paused && !self.inventory_open && !self.chat.is_open() {
             let eye_pos = self.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
             self.interaction

@@ -346,11 +346,25 @@ async fn game_loop(
     });
 
     loop {
-        let packet: ClientboundGamePacket = reader.read().await?;
-        handle_game_packet(&packet, &sender, event_tx, &registry_holder);
+        match reader.read().await {
+            Ok(packet) => handle_game_packet(&packet, &sender, event_tx, &registry_holder),
+            Err(e) if is_recoverable_read_error(&e) => {
+                log::warn!("Skipping malformed packet: {e}");
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 
+
+fn is_recoverable_read_error(err: &Box<ReadPacketError>) -> bool {
+    matches!(
+        err.as_ref(),
+        ReadPacketError::Parse { .. }
+            | ReadPacketError::UnknownPacketId { .. }
+            | ReadPacketError::LeftoverData { .. }
+    )
+}
 
 fn friendly_error_reason(err: &ConnectionError) -> String {
     let msg = err.to_string();

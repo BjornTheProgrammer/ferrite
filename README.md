@@ -1,3 +1,5 @@
+https://discord.gg/ucBA55bHPR
+
 # POMC
 
 A Minecraft client written in Rust from scratch. POMC connects to vanilla Minecraft servers, renders the world using Vulkan, and handles player physics — all without relying on Mojang's Java codebase.

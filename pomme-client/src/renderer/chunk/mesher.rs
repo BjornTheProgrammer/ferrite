@@ -1079,6 +1079,45 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 
 const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
 
+fn block_face_tex_tint(
+    state: azalea_block::BlockState,
+    dir: Direction,
+    uv_map: &AtlasUVMap,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> (AtlasRegion, u32) {
+    match classify_block(state) {
+        BlockKind::Water => (
+            uv_map.get_region("water_still"),
+            pack_tint_shifted([0.247, 0.463, 0.894]),
+        ),
+        BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
+        _ => {
+            if let Some(textures) = registry.get_textures(state) {
+                let tint = tint_color(
+                    textures.tint,
+                    snapshot.grass_tint(bx, by, bz),
+                    snapshot.foliage_tint(bx, by, bz),
+                );
+                let tex_name = match dir {
+                    Direction::Up => &textures.top,
+                    Direction::Down => &textures.bottom,
+                    Direction::North => &textures.north,
+                    Direction::South => &textures.south,
+                    Direction::East => &textures.east,
+                    Direction::West => &textures.west,
+                };
+                (uv_map.get_region(tex_name), tint)
+            } else {
+                (uv_map.get_region(""), MISSING_TINT)
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
     state: azalea_block::BlockState,
